@@ -9,6 +9,8 @@ from datetime import datetime, timedelta
 import markdown
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -96,11 +98,11 @@ def get_file_path(file_id: str) -> str | None:
 
 
 def download_file(file_path: str) -> bytes | None:
-    """Download a file from Telegram."""
+    """Download a file from Telegram with retry."""
     url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
     try:
         logger.info(f"Downloading file: {url}")
-        r = requests.get(url, timeout=30)
+        r = _tg_session.get(url, timeout=60)
         if r.status_code == 200:
             size = len(r.content)
             logger.info(f"Downloaded {size} bytes")
@@ -217,12 +219,29 @@ def ask_llm(chat_id: int, user_text: str | None, image_bytes: bytes | None) -> s
     return reply
 
 
+# --- Telegram HTTP session with retries ---
+def _make_telegram_session() -> requests.Session:
+    """Create a requests Session with exponential-backoff retry for Telegram API."""
+    session = requests.Session()
+    retry = Retry(
+        total=5,
+        backoff_factor=1.5,          # 1.5s, 2.25s, 3.4s, ...
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET", "POST"],
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://api.telegram.org", adapter)
+    return session
+
+_tg_session = _make_telegram_session()
+
 # --- Telegram API helpers ---
 def tg_post(method: str, data: dict | None = None) -> dict:
     """POST to Telegram Bot API."""
     url = f"{TELEGRAM_API}/{method}"
     try:
-        r = requests.post(url, json=data or {}, timeout=10)
+        r = _tg_session.post(url, json=data or {}, timeout=10)
         return r.json()
     except Exception as e:
         logger.exception(f"tg_post {method} failed: {e}")
@@ -318,7 +337,7 @@ logger.info("🚀 Бот запущен! Ожидание сообщений..."
 while True:
     try:
         logger.info(f"[GETUPDATES] offset={offset}")
-        r = requests.get(
+        r = _tg_session.get(
             f"{TELEGRAM_API}/getUpdates",
             params={"offset": offset, "timeout": 15, "allowed_updates": ["message"]},
             timeout=20,

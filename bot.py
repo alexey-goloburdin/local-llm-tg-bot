@@ -400,8 +400,48 @@ while True:
             continue
 
         logger.info(f"[{chat_id}] Got: {repr((text or '')[:100])} {'[image]' if image_bytes else ''}")
+
+        # 1. Immediately show "ща-ща-ща..." as a placeholder
+        placeholder = tg_post("sendMessage", {
+            "chat_id": chat_id,
+            "text": "<i>ща-ща-ща...</i>",
+            "parse_mode": "HTML",
+        })
+        ph_msg_id = None
+        if placeholder.get("ok") and "result" in placeholder:
+            ph_msg_id = placeholder["result"].get("message_id")
+            logger.info(f"[{chat_id}] Placeholder sent: msg_id={ph_msg_id}")
+
+        # 2. Call LLM
         try:
             reply = ask_llm(chat_id, text, image_bytes)
-            send_message(chat_id, reply)
         except Exception as e:
-            logger.exception(f"Failed to send reply for chat {chat_id}: {e}")
+            logger.exception(f"Failed to get LLM reply for chat {chat_id}: {e}")
+            reply = "⚠️ Ошибка при получении ответа от модели."
+
+        # 3. Convert reply to HTML (same pipeline as send_message)
+        raw_html = markdown.markdown(
+            reply,
+            extensions=["fenced_code", "codehilite", "tables"],
+        )
+        html_text = _clean_telegram_html(raw_html)
+
+        MAX = 3800
+        parts = _split_text(html_text, MAX)
+
+        # Delete placeholder and send fresh LLM reply
+        if ph_msg_id is not None:
+            tg_post("deleteMessage", {
+                "chat_id": chat_id,
+                "message_id": ph_msg_id,
+            })
+            logger.info(f"[{chat_id}] Deleted placeholder msg_id={ph_msg_id}")
+
+        for idx, part in enumerate(parts):
+            suffix = f"\n\n<i>(продолжение {idx+1}/{len(parts)})</i>" if len(parts) > 1 else ""
+            tg_post("sendMessage", {
+                "chat_id": chat_id,
+                "text": part + suffix,
+                "parse_mode": "HTML",
+            })
+        logger.info(f"[{chat_id}] Sent LLM reply ({len(parts)} message(s))")
